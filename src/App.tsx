@@ -42,7 +42,7 @@ ChartJS.register(
 );
 
 const endpoint =
-  "https://script.google.com/macros/s/AKfycbwjYNBJT8MN4uU2OPxgkBZcUX1xo9FxxbxnJI2gMqIcpPWRysiZf-Uki1N1O2rmXfS3/exec";
+  "https://script.google.com/macros/s/AKfycby9kyvmzPfwGE-C0cxEaxKQx7wSLvB7djEhx48JoRxjW6InKmg3qg4aad-3XU7OgCnp/exec";
 configureSync(endpoint);
 const SHEET_SEMESTER1 = "RekapSemester1";
 const SHEET_SEMESTER2 = "RekapSemester2";
@@ -2951,6 +2951,41 @@ const AttendanceTab: React.FC<{
     }
     await loadExistingAttendanceData();
   };
+
+  // Auto-sync: ambil perubahan dari aplikasi lain (siswa) setiap 15 detik
+  useEffect(() => {
+    if (students.length === 0) return;
+    const tick = async () => {
+      if (
+        document.hidden ||
+        isSaving ||
+        isSavingEdit ||
+        showEditModal ||
+        scanMode
+      )
+        return;
+      try {
+        const changed = await syncAll();
+        if (changed.length > 0) await loadExistingAttendanceData();
+      } catch (e) {
+        console.error("Auto-sync error:", e);
+      }
+    };
+    const id = window.setInterval(tick, 15000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, [
+    date,
+    selectedKelas,
+    students,
+    isSaving,
+    isSavingEdit,
+    showEditModal,
+    scanMode,
+  ]);
 
   useEffect(() => {
     if (students.length > 0) {
