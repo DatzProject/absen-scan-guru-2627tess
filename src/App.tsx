@@ -2115,8 +2115,13 @@ const AttendanceTab: React.FC<{
   students: Student[];
   onRecapRefresh: () => void;
   statusGuru?: string | null;
-}> = ({ students, onRecapRefresh, statusGuru }) => {
+  userRole?: "guru" | "siswa" | null;
+}> = ({ students, onRecapRefresh, statusGuru, userRole }) => {
   const [attendance, setAttendance] = useState<AttendanceRecord>({});
+  const isSiswa = userRole === "siswa";
+  const [deletingStudentId, setDeletingStudentId] = useState<string | null>(
+    null
+  );
 
   const getLocalDate = () => {
     const now = new Date();
@@ -2930,7 +2935,7 @@ const AttendanceTab: React.FC<{
           ket[student.id] = ex.keterangan || "";
           ids.add(student.id);
         } else {
-          rec[student.id] = "Hadir";
+          // Belum ada data absensi → status dibiarkan kosong
           ket[student.id] = "";
         }
       });
@@ -2999,7 +3004,6 @@ const AttendanceTab: React.FC<{
   useEffect(() => {
     if (students.length && !attendance[date]) {
       const init: { [key: string]: AttendanceStatus } = {};
-      students.forEach((s) => (init[s.id] = "Hadir"));
       setAttendance((prev) => ({ ...prev, [date]: init }));
     }
   }, [date, students, attendance]);
@@ -3073,7 +3077,7 @@ const AttendanceTab: React.FC<{
   };
 
   const setStatus = (sid: string, status: AttendanceStatus) => {
-    if (existingStudentIds.has(sid)) return;
+    if (isSiswa || existingStudentIds.has(sid)) return;
     setAttendance((prev) => ({
       ...prev,
       [date]: { ...prev[date], [sid]: status },
@@ -3166,15 +3170,18 @@ const AttendanceTab: React.FC<{
   };
 
   const handleSave = () => {
+    if (isSiswa) return;
     setIsSaving(true);
     const formattedDate = formatDateDDMMYYYY(date);
     const studentsToSave = (
       selectedKelas === "Semua" ? students : filteredStudents
-    ).filter((s) => !existingStudentIds.has(s.id));
+    ).filter(
+      (s) => !existingStudentIds.has(s.id) && !!attendance[date]?.[s.id]
+    );
 
     if (studentsToSave.length === 0) {
       alert(
-        "✅ Semua siswa sudah diabsen. Tidak ada data baru untuk disimpan."
+        "⚠️ Belum ada status yang dipilih. Klik Hadir / Izin / Sakit / Alpha pada siswa yang ingin disimpan."
       );
       setIsSaving(false);
       return;
@@ -3225,6 +3232,63 @@ const AttendanceTab: React.FC<{
       });
   };
 
+  const handleDeleteStudentAttendance = async (student: Student) => {
+    if (userRole !== "guru") return;
+
+    const formattedDate = formatDateDDMMYYYY(date);
+    if (
+      !confirm(
+        `Hapus data absensi ${student.name} pada tanggal ${formattedDate}?\n\nStatus, keterangan, dan jam hadir siswa ini akan dihapus. Tindakan ini tidak dapat dibatalkan.`
+      )
+    ) {
+      return;
+    }
+
+    setDeletingStudentId(student.id);
+
+    try {
+      // status kosong = hapus baris absensi siswa pada tanggal tsb (ditangani bulkUpdateAttendance di GAS)
+      await fetch(endpoint, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "bulkUpdateAttendance",
+          updates: [
+            {
+              tanggal: formattedDate,
+              nisn: student.nisn,
+              status: "",
+            },
+          ],
+        }),
+      });
+
+      // Bersihkan jejak scan agar siswa ini bisa di-scan ulang
+      sendingLockRef.current.delete(student.nisn);
+      setScannedStudents((prev) => {
+        const newSet = new Set(prev);
+        newSet.delete(student.id);
+        return newSet;
+      });
+      setScannedStudentPhotos((prev) =>
+        prev.filter((item) => item.student.id !== student.id)
+      );
+
+      // Beri waktu Apps Script menyelesaikan penghapusan (no-cors tidak bisa dibaca responsnya)
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await refreshAttendance();
+      onRecapRefresh();
+
+      alert(`✅ Data absensi ${student.name} berhasil dihapus.`);
+    } catch (error) {
+      console.error("Gagal menghapus data absensi siswa:", error);
+      alert("❌ Gagal menghapus data absensi. Coba lagi.");
+    } finally {
+      setDeletingStudentId(null);
+    }
+  };
+
   const statusColor: Record<AttendanceStatus, string> = {
     Hadir: "bg-green-500",
     Izin: "bg-yellow-400",
@@ -3235,7 +3299,8 @@ const AttendanceTab: React.FC<{
   const getAttendanceSummary = (): StatusSummary => {
     const summary: StatusSummary = { Hadir: 0, Izin: 0, Sakit: 0, Alpha: 0 };
     filteredStudents.forEach((s) => {
-      const status = (attendance[date]?.[s.id] || "Hadir") as AttendanceStatus;
+      const status = attendance[date]?.[s.id];
+      if (!status) return; // belum ada status → tidak dihitung
       summary[status]++;
     });
     return summary;
@@ -4148,31 +4213,33 @@ const AttendanceTab: React.FC<{
               </div>
             </div>
 
-            {existingStudentIds.size > 0 && !isLoadingExistingData && (
-              <div className="flex justify-end mb-2">
-                <button
-                  onClick={handleOpenEditModal}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "6px",
-                    padding: "8px 14px",
-                    backgroundColor: "#f97316",
-                    color: "#ffffff",
-                    fontWeight: 600,
-                    fontSize: "13px",
-                    borderRadius: "8px",
-                    border: "none",
-                    cursor: "pointer",
-                    boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
-                    whiteSpace: "nowrap", // ← cegah teks wrap/terpotong
-                    minWidth: "fit-content", // ← pastikan tombol tidak menyusut
-                  }}
-                >
-                  ✏️ Edit Data Absensi ({existingStudentIds.size} siswa)
-                </button>
-              </div>
-            )}
+            {userRole === "guru" &&
+              existingStudentIds.size > 0 &&
+              !isLoadingExistingData && (
+                <div className="flex justify-end mb-2">
+                  <button
+                    onClick={handleOpenEditModal}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "6px",
+                      padding: "8px 14px",
+                      backgroundColor: "#f97316",
+                      color: "#ffffff",
+                      fontWeight: 600,
+                      fontSize: "13px",
+                      borderRadius: "8px",
+                      border: "none",
+                      cursor: "pointer",
+                      boxShadow: "0 2px 6px rgba(0,0,0,0.15)",
+                      whiteSpace: "nowrap", // ← cegah teks wrap/terpotong
+                      minWidth: "fit-content", // ← pastikan tombol tidak menyusut
+                    }}
+                  >
+                    ✏️ Edit Data Absensi ({existingStudentIds.size} siswa)
+                  </button>
+                </div>
+              )}
 
             {isLoadingExistingData && (
               <div className="mb-4 bg-blue-50 border border-blue-200 rounded-lg p-4 text-center">
@@ -4274,14 +4341,15 @@ const AttendanceTab: React.FC<{
                                       ? "bg-gray-300 text-gray-400 cursor-not-allowed opacity-50"
                                       : attendance[date]?.[s.id] === status
                                       ? `${statusColor[status]} text-white`
-                                      : isExisting || isScanned
+                                      : isExisting || isScanned || isSiswa
                                       ? "bg-gray-200 text-gray-500 cursor-not-allowed"
                                       : "bg-white text-gray-700 border border-gray-300 hover:bg-gray-100"
                                   }`}
                                   disabled={
                                     isExisting ||
                                     isLoadingExistingData ||
-                                    isScanned
+                                    isScanned ||
+                                    isSiswa
                                   }
                                 >
                                   {status}
@@ -4301,21 +4369,45 @@ const AttendanceTab: React.FC<{
                                 setKeteranganValue(s.id, e.target.value)
                               }
                               disabled={
-                                isExisting || isLoadingExistingData || isScanned
+                                isExisting ||
+                                isLoadingExistingData ||
+                                isScanned ||
+                                isSiswa
                               }
                               className={`w-full px-2 py-1 text-xs border rounded ${
-                                isExisting || isLoadingExistingData || isScanned
+                                isExisting ||
+                                isLoadingExistingData ||
+                                isScanned ||
+                                isSiswa
                                   ? "bg-gray-100 text-gray-500 cursor-not-allowed"
                                   : "border-gray-300 focus:border-blue-500 focus:outline-none"
                               }`}
                             />
                             {isExisting && (
-                              <p className="text-xs text-gray-400 mt-1">
-                                🕐{" "}
-                                {existingAttendanceData.find(
-                                  (r: any) => r.nama === s.name
-                                )?.jam || "-"}
-                              </p>
+                              <div className="flex items-center justify-between mt-1">
+                                <p className="text-xs text-gray-400">
+                                  🕐{" "}
+                                  {existingAttendanceData.find(
+                                    (r: any) => r.nama === s.name
+                                  )?.jam || "-"}
+                                </p>
+                                {userRole === "guru" && (
+                                  <button
+                                    onClick={() =>
+                                      handleDeleteStudentAttendance(s)
+                                    }
+                                    disabled={deletingStudentId !== null}
+                                    className={`text-xs px-2 py-0.5 rounded text-white transition-colors ${
+                                      deletingStudentId !== null
+                                        ? "bg-red-300 cursor-not-allowed"
+                                        : "bg-red-500 hover:bg-red-600"
+                                    }`}
+                                  >
+                                    {deletingStudentId === s.id ? "⏳" : "🗑️"}{" "}
+                                    Hapus
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </div>
                         </td>
@@ -4326,7 +4418,7 @@ const AttendanceTab: React.FC<{
               </table>
             </div>
 
-            {!allStudentsHaveData && !isLoadingExistingData ? (
+            {isSiswa ? null : !allStudentsHaveData && !isLoadingExistingData ? (
               <button
                 onClick={handleSave}
                 disabled={isSaving}
@@ -7412,6 +7504,78 @@ const JadwalMengajarTab: React.FC<{
   );
 };
 
+type UserRole = "guru" | "siswa";
+
+const PASSWORDS: Record<UserRole, string> = {
+  guru: "1234",
+  siswa: "1111",
+};
+
+const LoginScreen: React.FC<{ onLogin: (role: UserRole) => void }> = ({
+  onLogin,
+}) => {
+  const [username, setUsername] = useState<UserRole>("guru");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
+  const handleLogin = () => {
+    if (password === PASSWORDS[username]) {
+      setError("");
+      onLogin(username);
+    } else {
+      setError("❌ Password salah!");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-gray-100 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-lg shadow-xl p-8 w-full max-w-sm">
+        <div className="flex justify-center mb-4">
+          <img src="\images\logo_2.png" alt="Logo" className="w-20 h-20" />
+        </div>
+        <h2 className="text-2xl font-bold text-center text-blue-700 mb-6">
+          🔐 Login
+        </h2>
+
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Username
+        </label>
+        <select
+          value={username}
+          onChange={(e) => setUsername(e.target.value as UserRole)}
+          className="w-full border border-gray-300 px-4 py-2 rounded-lg mb-4 bg-white"
+        >
+          <option value="guru">Guru</option>
+          <option value="siswa">Siswa</option>
+        </select>
+
+        <label className="block text-sm font-medium text-gray-700 mb-1">
+          Password
+        </label>
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleLogin();
+          }}
+          placeholder="Masukkan password"
+          className="w-full border border-gray-300 px-4 py-2 rounded-lg mb-2"
+        />
+
+        {error && <p className="text-red-600 text-sm mb-2">{error}</p>}
+
+        <button
+          onClick={handleLogin}
+          className="w-full mt-2 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
+        >
+          Masuk
+        </button>
+      </div>
+    </div>
+  );
+};
+
 const StudentAttendanceApp: React.FC = () => {
   const [students, setStudents] = useState<Student[]>([]);
   const [uniqueClasses, setUniqueClasses] = useState<string[]>(["Semua"]);
@@ -7432,6 +7596,23 @@ const StudentAttendanceApp: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [statusGuru, setStatusGuru] = useState<string | null>(null);
   const [loadingStudents, setLoadingStudents] = useState(true);
+  const [userRole, setUserRole] = useState<UserRole | null>(() => {
+    const saved = sessionStorage.getItem("userRole");
+    return saved === "guru" || saved === "siswa" ? saved : null;
+  });
+
+  const handleLogin = (role: UserRole) => {
+    sessionStorage.setItem("userRole", role);
+    setUserRole(role);
+    // Siswa langsung diarahkan ke halaman Absensi
+    setActiveTab(role === "siswa" ? "attendance" : "studentData");
+  };
+
+  const handleLogout = () => {
+    sessionStorage.removeItem("userRole");
+    setUserRole(null);
+    setIsSidebarOpen(false);
+  };
 
   const applyStudents = (data: Student[]) => {
     setStudents(data);
@@ -7496,6 +7677,11 @@ const StudentAttendanceApp: React.FC = () => {
     loadStudentsFromCache().then(() => fetchStudents());
     fetchStatusGuru();
 
+    // Jika sudah login sebagai siswa (setelah refresh), buka tab Absensi
+    if (sessionStorage.getItem("userRole") === "siswa") {
+      setActiveTab("attendance");
+    }
+
     const timer = setTimeout(() => {
       setIsLoading(false); // splash hanya tampilan
     }, 2000);
@@ -7505,6 +7691,11 @@ const StudentAttendanceApp: React.FC = () => {
 
   if (isLoading) {
     return <SplashScreen />;
+  }
+
+  // Belum login → tampilkan halaman login
+  if (!userRole) {
+    return <LoginScreen onLogin={handleLogin} />;
   }
 
   const isGuruKelas = statusGuru === "Guru Kelas";
@@ -7541,31 +7732,44 @@ const StudentAttendanceApp: React.FC = () => {
             ? [{ tab: "jadwalMengajar", label: "🗓️ Jadwal Mengajar" }]
             : []),
           { tab: "clearData", label: "🗑️ Hapus Data" },
-        ].map(({ tab, label }) => (
-          <button
-            key={tab}
-            onClick={() => {
-              setActiveTab(
-                tab as
-                  | "schoolData"
-                  | "studentData"
-                  | "attendance"
-                  | "recap"
-                  | "graph"
-                  | "semesterRecap"
-                  | "clearData"
-              );
-              setIsSidebarOpen(false);
-            }}
-            className={`w-full text-left py-2 px-4 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
-              activeTab === tab
-                ? "bg-blue-600 text-white"
-                : "text-gray-600 hover:bg-gray-100"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
+        ]
+          .filter(
+            ({ tab }) =>
+              userRole === "guru" ||
+              ["attendance", "recap", "semesterRecap", "graph"].includes(tab)
+          )
+          .map(({ tab, label }) => (
+            <button
+              key={tab}
+              onClick={() => {
+                setActiveTab(
+                  tab as
+                    | "schoolData"
+                    | "studentData"
+                    | "attendance"
+                    | "recap"
+                    | "graph"
+                    | "semesterRecap"
+                    | "clearData"
+                );
+                setIsSidebarOpen(false);
+              }}
+              className={`w-full text-left py-2 px-4 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 ${
+                activeTab === tab
+                  ? "bg-blue-600 text-white"
+                  : "text-gray-600 hover:bg-gray-100"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+
+        <button
+          onClick={handleLogout}
+          className="w-full text-left py-2 px-4 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 transition-colors flex items-center gap-2 mt-4 border-t border-gray-200 pt-4"
+        >
+          🚪 Logout ({userRole === "guru" ? "Guru" : "Siswa"})
+        </button>
       </aside>
 
       {/* Hamburger Menu Button */}
@@ -7601,10 +7805,18 @@ const StudentAttendanceApp: React.FC = () => {
         </div>
 
         <div className="py-4">
-          {activeTab === "schoolData" && (
+          {userRole === "siswa" &&
+            !["attendance", "recap", "semesterRecap", "graph"].includes(
+              activeTab
+            ) && (
+              <div className="text-center text-gray-500 py-8">
+                ⛔ Anda tidak memiliki akses ke halaman ini.
+              </div>
+            )}
+          {activeTab === "schoolData" && userRole === "guru" && (
             <SchoolDataTab onRefresh={handleRefresh} />
           )}
-          {activeTab === "studentData" && (
+          {activeTab === "studentData" && userRole === "guru" && (
             <StudentDataTab
               students={students}
               onRefresh={() => setTimeout(fetchStudents, 1500)}
@@ -7617,6 +7829,7 @@ const StudentAttendanceApp: React.FC = () => {
               students={students}
               onRecapRefresh={handleRecapRefresh}
               statusGuru={statusGuru}
+              userRole={userRole}
             />
           )}
           {activeTab === "recap" && (
@@ -7633,16 +7846,18 @@ const StudentAttendanceApp: React.FC = () => {
               students={students} // ✅ TAMBAHKAN INI
             />
           )}
-          {activeTab === "daftarHadir" && (
+          {activeTab === "daftarHadir" && userRole === "guru" && (
             <DaftarHadirTab students={students} uniqueClasses={uniqueClasses} />
           )}
-          {activeTab === "tanggalMerah" && (
+          {activeTab === "tanggalMerah" && userRole === "guru" && (
             <TanggalMerahTab onRefresh={handleRefresh} />
           )}
-          {activeTab === "jadwalMengajar" && shouldShowJadwalMengajar && (
-            <JadwalMengajarTab onRefresh={handleRefresh} />
-          )}
-          {activeTab === "clearData" && <ClearDataTab />}
+          {activeTab === "jadwalMengajar" &&
+            userRole === "guru" &&
+            shouldShowJadwalMengajar && (
+              <JadwalMengajarTab onRefresh={handleRefresh} />
+            )}
+          {activeTab === "clearData" && userRole === "guru" && <ClearDataTab />}
         </div>
       </main>
     </div>
