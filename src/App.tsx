@@ -2976,7 +2976,7 @@ const AttendanceTab: React.FC<{
         console.error("Auto-sync error:", e);
       }
     };
-    const id = window.setInterval(tick, 15000);
+    const id = window.setInterval(tick, 7000);
     document.addEventListener("visibilitychange", tick);
     return () => {
       clearInterval(id);
